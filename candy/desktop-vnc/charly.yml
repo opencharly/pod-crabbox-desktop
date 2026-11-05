@@ -1,0 +1,231 @@
+# desktop-vnc — Xfce over TigerVNC + noVNC, with the Wayland stack installed.
+#
+# Sources:
+#   - CONTAINERD-IMAGES.md §2, the `pod-crabbox-desktop` row: xfce
+#     (`tigervnc`, `xfce4-*`, `dbus-x11`) and wayland (`labwc`, `wayvnc`),
+#     `novnc` + `websockify`, `/usr/local/bin/crabbox-start-desktop`; started
+#     over SSH, never `exec`.
+#   - `pacman -Si` (run 2026-11-05) for every repository package below:
+#     xfce4-session, xfwm4, xfce4-panel, xfdesktop, xfce4-settings,
+#     xfce4-terminal, xfce4-appfinder, thunar (extra); dbus (core);
+#     xorg-xinit, xorg-xrdb, xorg-xsetroot, tigervnc, labwc, wayvnc (extra).
+#   - The tigervnc 1.16.2-5 package's own scripts, read from the Arch package
+#     (2026-11-05): `vncserver` takes the DISPLAY NUMBER AS ITS ONLY ARGUMENT
+#     ("usage: vncserver <display>") and reads geometry/depth/localhost/
+#     SecurityTypes/session from /etc/tigervnc/vncserver-config-defaults; it
+#     execs `xinit /etc/X11/xinit/Xsession <Exec> -- Xvnc :N …`. The xfce4-session
+#     4.20.4-1 package supplies /usr/share/xsessions/xfce.desktop (Exec=startxfce4).
+#   - noVNC and websockify are NOT in the Arch/CachyOS repositories: measured
+#     2026-11-05, `pacman -Ss novnc` and `pacman -Ss websockify` are both empty.
+#     They are installed from their PINNED upstream releases with `download:`,
+#     using the exact source URLs the AUR PKGBUILDs use (AUR RPC, 2026-11-05):
+#     noVNC 1.6.0 (`https://github.com/noVNC/noVNC/archive/v1.6.0.tar.gz`) and
+#     websockify 0.13.0 (`https://github.com/novnc/websockify/archive/v0.13.0.tar.gz`).
+#     websockify's core proxy imports only the Python standard library; its
+#     jwcrypto/redis/requests/numpy paths are lazy token-plugin imports, so the
+#     stock `python` package the base candy already installs is sufficient.
+#   - `dbus-x11` is a Debian/Fedora package name; on Arch the session bus and
+#     `dbus-launch` are the `dbus` package (core), asserted below.
+desktop-vnc:
+    candy:
+        description: |
+            Xfce on TigerVNC with a noVNC web front end, plus the Wayland stack
+            (labwc + wayvnc) for a consumer that runs it instead. The image
+            installs Xfce's session components, `tigervnc` (`Xvnc`, `vncserver`),
+            `dbus` (the session bus) and `labwc` + `wayvnc` from the Arch/CachyOS
+            repositories, and installs noVNC 1.6.0 and websockify 0.13.0 from
+            their pinned upstream releases (neither has an Arch/CachyOS package).
+            `/etc/tigervnc/vncserver-config-defaults` pins the Xfce session,
+            1920x1080x24, the loopback bind, and disabled VNC auth (the loopback
+            bind and the lease's SSH session are the boundary).
+            `/usr/local/bin/crabbox-start-desktop` starts the Xfce session on
+            display `:1` (VNC 5901) and serves the noVNC web root with websockify
+            on `127.0.0.1:6080`; the consumer reaches the display through the
+            lease's SSH session, and the wrapper never replaces the image
+            entrypoint, so sshd stays PID 1 and the readiness hook still runs
+            first.
+        # The lease SSH port is the base image's own contract. An OCI/imported
+        # base does not carry its candy chain's ports across the boundary, so the
+        # published number is restated here (one number, taken from the base
+        # image's label). The VNC/noVNC ports are loopback-only and are not
+        # published.
+        port:
+            - 2222
+        var:
+            # The pinned upstream releases. The release TAG and the archive name
+            # both carry the `v` for noVNC; the websockify archive does too.
+            NOVNC_VERSION: "1.6.0"
+            WEBSOCKIFY_VERSION: "0.13.0"
+        distro:
+            arch:
+                package:
+                    # The Xfce session and the window manager it needs.
+                    - xfce4-session
+                    - xfwm4
+                    - xfce4-panel
+                    - xfdesktop
+                    - xfce4-settings
+                    - xfce4-terminal
+                    - xfce4-appfinder
+                    - thunar
+                    # Arch's session bus (the plan row's `dbus-x11`).
+                    - dbus
+                    # `xinit` is what TigerVNC's `vncserver` runs the session
+                    # through; xrdb/xsetroot are used by Xfce's xinitrc.
+                    - xorg-xinit
+                    - xorg-xrdb
+                    - xorg-xsetroot
+                    # VNC.
+                    - tigervnc
+                    # The Wayland alternative the plan row names.
+                    - labwc
+                    - wayvnc
+        plan:
+            # ------------------------------------------------------------------
+            # noVNC + websockify: pinned upstream releases, no AUR builder.
+            # ------------------------------------------------------------------
+            - run: install the pinned noVNC release into the web root
+              download: "https://github.com/noVNC/noVNC/archive/v${NOVNC_VERSION}.tar.gz"
+              extract: tar.gz
+              strip_components: 1
+              to: /usr/share/webapps/novnc
+              run_as: root
+            - run: install the pinned websockify release
+              download: "https://github.com/novnc/websockify/archive/v${WEBSOCKIFY_VERSION}.tar.gz"
+              extract: tar.gz
+              strip_components: 1
+              to: /usr/local/lib/websockify
+              run_as: root
+            - run: expose the websockify console entry point on PATH
+              write: /usr/local/bin/websockify
+              mode: "0755"
+              run_as: root
+              content: |
+                #!/bin/sh
+                # The pinned websockify release, run from its unpacked source tree.
+                # Its core proxy needs only the Python standard library; the
+                # token-plugin extras import lazily.
+                PYTHONPATH=/usr/local/lib/websockify exec python -c \
+                    'from websockify.websocketproxy import websockify_init; websockify_init()' "$@"
+            # ------------------------------------------------------------------
+            # The TigerVNC side: one config file, because `vncserver` accepts
+            # only a display number on its command line.
+            # ------------------------------------------------------------------
+            - run: pin the TigerVNC session, geometry, loopback bind and auth mode
+              write: /etc/tigervnc/vncserver-config-defaults
+              mode: "0644"
+              run_as: root
+              content: |
+                # Managed by the opencharly pod-crabbox-desktop candy.
+                #
+                # `vncserver <display>` is the only accepted form; these keys are
+                # the documented /etc/tigervnc/vncserver-config-defaults surface.
+                # securitytypes=None disables VNC auth because the server binds
+                # 127.0.0.1 only and the lease's SSH session is the boundary;
+                # without it vncserver refuses to start when no password file
+                # exists. The session key selects /usr/share/xsessions/xfce.desktop.
+                session=xfce
+                geometry=1920x1080
+                depth=24
+                localhost
+                SecurityTypes=None
+            - run: install the desktop starter
+              copy: crabbox-start-desktop
+              to: /usr/local/bin/crabbox-start-desktop
+              mode: "0755"
+              run_as: root
+            # ------------------------------------------------------------------
+            # The variant's own surface.
+            # ------------------------------------------------------------------
+            - check: the TigerVNC server and session controller are installed
+              id: desktop-vnc-tigervnc
+              exit_status: 0
+              command: >-
+                  test -x /usr/bin/Xvnc &&
+                  test -x /usr/bin/vncserver
+            - check: the TigerVNC server reports its version
+              id: desktop-vnc-tigervnc-version
+              exit_status: 0
+              stdout:
+                  - contains: "TigerVNC"
+              # Xvnc writes its banner to stderr when stdout is not a terminal.
+              command: Xvnc -version 2>&1
+            - check: the Xfce session binary and its desktop entry are installed
+              id: desktop-vnc-xfce-session
+              exit_status: 0
+              command: >-
+                  test -x /usr/bin/xfce4-session &&
+                  test -f /usr/share/xsessions/xfce.desktop
+            - check: the Xfce session package reports its installed version
+              id: desktop-vnc-xfce-version
+              exit_status: 0
+              stdout:
+                  - contains: "xfce4-session"
+              # `xfce4-session --version` needs a DISPLAY; the package probe is the
+              # deterministic form and still carries the version string.
+              command: pacman -Q xfce4-session
+            - check: the session bus and dbus-launch are installed
+              id: desktop-vnc-dbus
+              exit_status: 0
+              command: >-
+                  command -v dbus-launch &&
+                  command -v dbus-run-session
+            - check: noVNC's pinned web root is installed at the websockify --web path
+              id: desktop-vnc-novnc-web-root
+              exit_status: 0
+              command: >-
+                  test -f /usr/share/webapps/novnc/vnc.html &&
+                  test -f /usr/share/webapps/novnc/vnc_lite.html
+            - check: the pinned websockify module imports and its CLI runs
+              id: desktop-vnc-websockify
+              exit_status: 0
+              stdout:
+                  - contains: "--web"
+              command: websockify --help
+            - check: the Wayland desktop stack (labwc + wayvnc) is installed
+              id: desktop-vnc-wayland
+              exit_status: 0
+              command: >-
+                  test -x /usr/bin/labwc &&
+                  test -x /usr/bin/wayvnc
+            - check: the TigerVNC config selects Xfce, loopback only, and disabled VNC auth
+              id: desktop-vnc-tigervnc-config
+              exit_status: 0
+              command: >-
+                  grep -qx 'session=xfce' /etc/tigervnc/vncserver-config-defaults &&
+                  grep -qx 'geometry=1920x1080' /etc/tigervnc/vncserver-config-defaults &&
+                  grep -qx 'depth=24' /etc/tigervnc/vncserver-config-defaults &&
+                  grep -qx 'localhost' /etc/tigervnc/vncserver-config-defaults &&
+                  grep -qx 'SecurityTypes=None' /etc/tigervnc/vncserver-config-defaults
+            - check: the desktop starter is executable, starts TigerVNC, and serves the noVNC web root on loopback 6080 to VNC 5901
+              id: desktop-vnc-wrapper
+              exit_status: 0
+              command: >-
+                  test -x /usr/local/bin/crabbox-start-desktop &&
+                  grep -q -- 'vncserver' /usr/local/bin/crabbox-start-desktop &&
+                  grep -q -- '--web' /usr/local/bin/crabbox-start-desktop &&
+                  grep -q -- '/usr/share/webapps/novnc' /usr/local/bin/crabbox-start-desktop &&
+                  grep -q -- 'CRABBOX_NOVNC_PORT:-6080' /usr/local/bin/crabbox-start-desktop &&
+                  grep -q -- '5900 +' /usr/local/bin/crabbox-start-desktop &&
+                  grep -q -- '127.0.0.1:' /usr/local/bin/crabbox-start-desktop
+            # ------------------------------------------------------------------
+            # The inherited lease contract, probed at THIS image's boundary.
+            # ------------------------------------------------------------------
+            - check: the inherited lease SSH contract is present (sshd, bootstrap, readiness hook)
+              id: desktop-vnc-lease-binaries
+              exit_status: 0
+              command: >-
+                  test -x /usr/sbin/sshd &&
+                  test -x /usr/local/libexec/crabbox/bootstrap.sh &&
+                  test -x /usr/local/libexec/crabbox/ready
+            - check: the inherited lease login user is crabbox at uid 1000
+              id: desktop-vnc-lease-user
+              exit_status: 0
+              command: >-
+                  test "$(getent passwd 1000 | cut -d: -f1)" = crabbox
+            - check: the inherited SSH drop-in names port 2222 and sshd parses it
+              id: desktop-vnc-lease-sshd
+              exit_status: 0
+              command: >-
+                  grep -qx 'Port 2222' /etc/ssh/sshd_config.d/99-crabbox.conf &&
+                  /usr/sbin/sshd -t

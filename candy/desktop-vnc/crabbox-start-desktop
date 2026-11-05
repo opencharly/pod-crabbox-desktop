@@ -1,0 +1,29 @@
+#!/bin/bash
+# /usr/local/bin/crabbox-start-desktop — start Xfce over TigerVNC + noVNC.
+#
+# Started over SSH by the lease consumer. It never replaces the image
+# entrypoint, so sshd stays PID 1 and the readiness hook still runs first.
+#
+# The session, geometry, depth, loopback bind and disabled VNC auth live in
+# /etc/tigervnc/vncserver-config-defaults: TigerVNC's `vncserver` accepts only
+# the display number on its command line and reads everything else there.
+set -euo pipefail
+
+display="${CRABBOX_VNC_DISPLAY:-:1}"
+novnc_port="${CRABBOX_NOVNC_PORT:-6080}"
+novnc_web="${CRABBOX_NOVNC_WEB:-/usr/share/webapps/novnc}"
+# Display :N is VNC port 5900+N.
+vnc_port="${CRABBOX_VNC_PORT:-$((5900 + ${display#:}))}"
+
+vncserver "${display}" &
+vnc_pid=$!
+
+# noVNC's static web root over websockify. Both the WebSocket listener and the
+# VNC target are loopback; the lease's SSH session is the boundary.
+websockify --web "${novnc_web}" "127.0.0.1:${novnc_port}" "127.0.0.1:${vnc_port}" &
+ws_pid=$!
+
+# Whichever half exits takes the other with it, so a stopped desktop leaves no
+# orphan Xvnc behind.
+trap 'kill "${vnc_pid}" "${ws_pid}" 2>/dev/null || true' EXIT INT TERM
+wait -n "${vnc_pid}" "${ws_pid}"

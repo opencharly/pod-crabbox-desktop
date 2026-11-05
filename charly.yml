@@ -1,0 +1,58 @@
+# pod-crabbox-desktop — the desktop lease image for the Crabbox containerd
+# provider.
+#
+# One repo per image (W5.2). The image imports the base lease image at a PINNED
+# tag, so the image tag and the git tag name the same build:
+# ghcr.io/opencharly/pod-crabbox-desktop:<tag> is the tree tagged <tag>.
+repo: github.com/opencharly/pod-crabbox-desktop
+defaults:
+    platform:
+        - linux/amd64
+    tag: auto
+    registry: ghcr.io/opencharly
+    build:
+        - pac
+import:
+    # The lease base image, pinned at the newest base tag.
+    - crabbox: '@github.com/opencharly/pod-crabbox:v2026.307.1828'
+discover:
+    - path: candy
+      recursive: true
+
+# The desktop variant. The lease contract is inherited unchanged; this image
+# adds an Xfce desktop served over TigerVNC and noVNC, plus the Wayland stack.
+pod-crabbox-desktop:
+    candy:
+        description: |
+            The desktop lease image for a Crabbox `containerd` lease: the base
+            `pod-crabbox` contract (sshd on 2222, user `crabbox` with passwordless
+            sudo, the read-only `/crabbox` inputs, the shared bootstrap and the
+            readiness hook) with Xfce on TigerVNC and a noVNC web front end, plus
+            the Wayland stack (`labwc`, `wayvnc`) for a consumer that prefers it.
+            `/usr/local/bin/crabbox-start-desktop` starts the Xfce session on a
+            loopback-only VNC display and serves noVNC through `websockify` on
+            `127.0.0.1:6080`. It is started over the lease's SSH session and NEVER
+            replaces the entrypoint, so sshd stays PID 1 and the readiness hook
+            still runs first. noVNC and websockify come from their pinned upstream
+            releases (neither has an Arch/CachyOS package); every other package is
+            an Arch/CachyOS repository package.
+        base: crabbox.pod-crabbox
+        # An imported/OCI base does not inherit the parent's distro/build values,
+        # so the CachyOS chain is declared here; the base image is itself CachyOS.
+        distro:
+            - cachyos
+            - arch
+        # noVNC and websockify are NOT in the Arch/CachyOS repositories. They are
+        # installed from their pinned upstream releases with `download:` (the same
+        # URLs the AUR PKGBUILDs use) rather than through the AUR builder: a
+        # variant repo that imports its base cannot resolve the imported
+        # `arch-builder` at its own build tag (measured: `FROM
+        # ghcr.io/opencharly/arch-builder:<this-build-tag>` → "not found"), and
+        # the imported builder is deliberately not pushed by a variant.
+        # PID 1 is the base image's `sshd -D`, which must run as root; the LOGIN
+        # user stays `crabbox` (uid 1000), created by the inherited candy.
+        user: root
+        uid: 0
+        gid: 0
+        candy:
+            - desktop-vnc
