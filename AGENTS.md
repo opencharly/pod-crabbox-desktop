@@ -26,8 +26,8 @@ Canonical files:
 ## Load these skills first (R0)
 
 - `/charly-image:image` — the `candy:` image entry (base, user, build, builder).
-- `/charly-image:layer` — the candy body: `distro:` packages, `aur:`, plan step
-  verbs, and the `check:` surface.
+- `/charly-image:layer` — the candy body: `distro:` packages, plan step verbs,
+  and the `check:` surface.
 - `/charly-distros:cachyos` — the CachyOS base, the `arch-builder`, and Arch
   package semantics.
 - `/charly-build:build` — the image build and the pinned-release `download:` path.
@@ -69,8 +69,8 @@ Canonical files:
   its candy.
 - `charly box generate pod-crabbox-desktop` — inspect the emitted Containerfile
   and the baked `ai.opencharly.description` plan.
-- `charly box build pod-crabbox-desktop` — the local image build (it runs the AUR
-  builder for noVNC/websockify).
+- `charly box build pod-crabbox-desktop` — the local image build (`pac` packages
+  plus the pinned-release noVNC/websockify `download:` steps).
 - `charly check box pod-crabbox-desktop` — the build-scope `check:` steps.
 - The PR image build (`.github/workflows/image.yml`, `pull_request` path) builds
   the image and publishes nothing; the merge-time `workflow_run` path publishes

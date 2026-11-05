@@ -62,7 +62,7 @@ core proxy needs only the Python standard library, which the base image ships.
 
 ## Layout
 
-- `charly.yml` — the `pod-crabbox-desktop` image (pinned base, `pac` + `aur` build).
+- `charly.yml` — the `pod-crabbox-desktop` image (pinned base, `pac` build; noVNC/websockify from their pinned upstream releases with `download:`).
 - `candy/desktop-vnc/` — packages, the TigerVNC config, the starter, and the
   `check:` steps.
 - `.github/workflows/tag-on-merge.yml` — CalVer tag + `CHANGELOG/` on merge.
