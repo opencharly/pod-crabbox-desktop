@@ -43,9 +43,11 @@ ssh -L 6080:127.0.0.1:6080 crabbox@<lease>
 # open http://127.0.0.1:6080/vnc.html
 ```
 
-The wrapper starts `vncserver :1` (Xfce, 1920x1080x24, loopback only) and
-`websockify` serving noVNC's static web root on `127.0.0.1:6080`. Neither port
-is published; the SSH tunnel is how a consumer reaches them.
+The wrapper starts a D-Bus session bus (a lease has no logind, so nothing else
+provides one and Xfce cannot start its components without it), then
+`vncserver :1` (Xfce, 1920x1080x24, loopback only) and `websockify` serving
+noVNC's static web root on `127.0.0.1:6080`. Neither port is published; the SSH
+tunnel is how a consumer reaches them.
 
 VNC authentication is disabled by design: the server binds loopback only, so
 the lease's SSH session is the boundary. `vncserver` refuses to start without a

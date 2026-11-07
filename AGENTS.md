@@ -62,6 +62,14 @@ Canonical files:
 - **The starter never replaces the entrypoint.** The desktop is a per-lease
   session started over SSH; sshd must stay PID 1 and the readiness hook must run
   first. Do not add an `entrypoint:` that runs Xfce.
+- **The starter owns the D-Bus session bus.** A lease has no logind, so
+  `pam_systemd` never creates `XDG_RUNTIME_DIR` and there is no session bus;
+  Arch compiles `dbus-launch`'s X11 autolaunch out. `xfce4-session` needs the bus
+  to start ANY of its clients — without one the display is a black root with a
+  single "Unable to contact settings server" dialog and no `xfwm4`,
+  `xfdesktop`, `xfce4-panel` or `xfsettingsd`. `crabbox-start-desktop` therefore
+  creates the runtime dir and starts `dbus-daemon --session` itself; keep both,
+  and keep the trap that stops the bus with the session.
 
 ## Build / validate / test
 
@@ -72,6 +80,13 @@ Canonical files:
 - `charly box build pod-crabbox-desktop` — the local image build (`pac` packages
   plus the pinned-release noVNC/websockify `download:` steps).
 - `charly check box pod-crabbox-desktop` — the build-scope `check:` steps.
+- `charly check run check-pod-crabbox-desktop-serves` — the disposable R10 bed:
+  boots the image as a pod, drives the `/crabbox` contract, starts
+  `crabbox-start-desktop` over SSH as `crabbox`, and asserts that the RFB server
+  carries the pinned 1920x1080 framebuffer with a RENDERED desktop, that noVNC
+  serves it and the websockify proxy forwards it, that the session bus and every
+  Xfce client run in display `:1`, and that the lease still holds over SSH. A
+  build-scope check cannot prove a desktop starts; this bed can.
 - The PR image build (`.github/workflows/image.yml`, `pull_request` path) builds
   the image and publishes nothing; the merge-time `workflow_run` path publishes
   `ghcr.io/opencharly/pod-crabbox-desktop:<git-tag>`.

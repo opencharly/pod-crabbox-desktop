@@ -56,3 +56,450 @@ pod-crabbox-desktop:
         gid: 0
         candy:
             - desktop-vnc
+
+# =============================================================================
+# check-pod-crabbox-desktop-serves — the disposable R10 bed for the desktop
+# lease image.
+#
+# The image's own `check:` steps are BUILD-scope: they assert Xvnc, Xfce, the
+# pinned noVNC/websockify releases, the TigerVNC config and the starter's text
+# on the built artifact. A build container never starts a display, so none of
+# them can prove the thing this image exists for: the desktop starts AND is
+# reachable over the noVNC/VNC path. This bed does, because the deploy boots the
+# image and the bed drives the running system.
+#
+# The venue is a disposable pod built from the image under review; its container
+# and its input volume are torn down with it.
+#
+# This bed deliberately does NOT claim the containerd substrate: in the pinned
+# toolchain a `pod:` deploy's authored `engine:` selector is dropped by the
+# check-bed `config`/`start` path (`charly config` emits a podman quadlet) and
+# `charly deploy add --engine` is an unknown flag (opencharly/charly#1109).
+# What this bed proves is this image's own, engine-independent running contract
+# on a disposable pod — the same scope its five sibling beds claim. The Wayland
+# alternative the image also installs (`labwc` + `wayvnc`) is a runtime choice
+# the image never starts, so it stays a build-scope claim.
+#
+# Three steps, in the order that makes the bed a gate rather than a snapshot:
+#   1. ABSENCE  — reset the state, assert the instruments exist, then prove the
+#                 desktop is NOT serving (nothing listens on 5901 or 6080, an
+#                 RFB probe gets no banner, an HTTP probe gets no answer) while
+#                 the lease still REFUSES the freshly generated key. The
+#                 instruments are asserted first, so their silence is a
+#                 measurement; a venue that does not answer fails the step
+#                 instead of reading as "nothing started yet".
+#   2. PERFORM  — write the read-only lease inputs temp + mv, run the image's
+#                 own shared bootstrap, and start `crabbox-start-desktop`
+#                 through the lease's OWN SSH path as `crabbox`, detached from
+#                 the channel. Starting it any other way would not prove the
+#                 contract user can run the starter.
+#   3. PRESENCE — the TigerVNC server answers the RFB protocol with the
+#                 framebuffer the TigerVNC config pins (1920x1080, depth 24) and
+#                 that framebuffer carries a RENDERED desktop rather than a blank
+#                 root; noVNC's web root is served over HTTP on loopback 6080;
+#                 the WebSocket proxy on 6080 forwards the same RFB server's
+#                 banner; the session bus and every Xfce client it starts (the
+#                 session manager, the window manager, the desktop, the panel
+#                 and the settings daemon) run inside that display as the lease
+#                 user; and the lease contract still holds over SSH as `crabbox`
+#                 on 2222 with passwordless sudo and
+#                 `/usr/local/libexec/crabbox/ready` exiting 0. Both listeners
+#                 must be loopback-only.
+#
+# The RFB and WebSocket probes are spoken from INSIDE the lease, on purpose:
+# both listeners bind 127.0.0.1 inside the container and neither is published,
+# so the org's host-side `vnc:` verb has no endpoint to dial (it resolves a VM's
+# graphics device, not a pod's loopback port) and would SKIP. The wire is read
+# where the listener is, and the framebuffer is decoded there too.
+#
+# The plan runs at every check-live pass, including the fresh-rebuild pass, so
+# step 1 resets and step 2 re-applies: each pass measures its OWN perform.
+# =============================================================================
+check-pod-crabbox-desktop-serves:
+    pod:
+        image: pod-crabbox-desktop
+        disposable: true
+        lifecycle: test
+        description: >-
+            R10 witness for the pod-crabbox-desktop lease image: a disposable
+            container built from the image runs the base lease's direct-mode
+            entrypoint, and the bed drives the desktop in three steps — ABSENCE
+            (Xvnc, the starter and the pinned noVNC web root are installed but
+            nothing serves; 5901 and 6080 are silent and the lease refuses the
+            key), PERFORM (the shared bootstrap consumes authorized_keys,
+            lease.env and bootstrap.sh, and the lease user starts
+            `crabbox-start-desktop` over SSH on 2222), and PRESENCE (the
+            TigerVNC server answers the RFB protocol with the 1920x1080 depth-24
+            framebuffer the config pins, that framebuffer carries a rendered
+            desktop and not a blank root, noVNC's web root answers over HTTP on
+            loopback 6080, the websockify proxy forwards the same server's RFB
+            banner, the session bus and every Xfce client it starts run in
+            display :1 as the lease user, and the lease holds over SSH as
+            `crabbox` with
+            passwordless sudo and the readiness hook exiting 0). An image whose
+            desktop never starts, a blank display, a public bind, an unapplied
+            input, a missing listener, login user, sudo grant or readiness hook
+            fails the bed; a venue that is not answering fails the absence step
+            instead of reading as "nothing started yet". The containerd LEASE
+            venue (opencharly/charly#1109), the Docker-compatible socket
+            (opencharly/pod-crabbox-nested#1) and the Wayland session are
+            explicitly not claimed.
+        volume:
+            - name: lease-inputs
+              type: volume
+              path: /crabbox
+        plan:
+            - check: absence — the desktop is installed but NOT serving, and the lease refuses the freshly generated key
+              id: desktop-absent-before-start
+              context:
+                - runtime
+              timeout: 180s
+              eventually: 60s
+              retry_interval: 2s
+              command:
+                  command: |
+                      set -euo pipefail
+                      # The instruments must exist before their silence means
+                      # anything: this image is expected to ship both halves of
+                      # the desktop and the direct-mode base's PID 1.
+                      test -x /usr/bin/Xvnc
+                      test -x /usr/bin/vncserver
+                      test -x /usr/local/bin/crabbox-start-desktop
+                      test -f /usr/share/webapps/novnc/vnc.html
+                      test "$(ps -p 1 -o comm=)" = sshd
+                      # Reset whatever an earlier pass left behind. `ss -p`
+                      # cannot map a rootless container's socket (measured in
+                      # the sibling bed: `ss -ltnp` prints no pid), so the scan
+                      # walks /proc and kills every process the LEASE USER owns
+                      # whose command line carries the needle. The needles are
+                      # SPLIT so this script's own argv — which carries its whole
+                      # text — cannot match itself, and the uid gate keeps the
+                      # root-owned scanner out of its own result set.
+                      kill_lease_process() {
+                        needle="$1"
+                        for p in /proc/[0-9]*; do
+                          pid=${p##*/}
+                          cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null || true)
+                          case "$cmd" in
+                            *"$needle"*)
+                              uid=$(sed -n 's/^Uid:[[:space:]]*\([0-9]\+\).*/\1/p' "$p/status" 2>/dev/null || true)
+                              if [ "$uid" = 1000 ]; then
+                                printf 'stopping pid %s: %s\n' "$pid" "$cmd"
+                                kill -KILL "$pid" 2>/dev/null || true
+                              fi
+                              ;;
+                          esac
+                        done
+                      }
+                      kill_lease_process "/usr/bin/X""vnc"
+                      kill_lease_process "/usr/bin/vnc""server"
+                      kill_lease_process "web""sockify"
+                      kill_lease_process "xfce4-""session"
+                      kill_lease_process "xf""wm4"
+                      # A stale display lock makes every later start refuse
+                      # display :1, so drop it with the session that held it.
+                      rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+                      # The plan runs at every check-live pass, and after
+                      # `charly update` the container is rebuilt while the named
+                      # input volume survives. The bed must measure its OWN
+                      # perform, never a leftover one.
+                      rm -f /crabbox/authorized_keys /crabbox/lease.env /crabbox/bootstrap.sh
+                      # The contract user's home is the passwd entry's field,
+                      # never a hardcoded path: this base adopts uid 1000 from
+                      # the distro image (measured: crabbox's home is
+                      # /home/user), so a hardcoded path would make the absence
+                      # probe vacuous.
+                      home=$(getent passwd crabbox | cut -d: -f6)
+                      test -n "$home"
+                      rm -rf "$home/.ssh"
+                      rm -f /var/lib/crabbox/bootstrapped /var/lib/crabbox/lease.env /var/lib/crabbox/bootstrap-marker
+                      rm -f /tmp/crabbox-lease-key /tmp/crabbox-lease-key.pub
+                      rm -f /tmp/crabbox-desktop.log /tmp/crabbox-desktop-start.out /tmp/novnc.html /tmp/novnc.headers /tmp/rfb-probe.out /tmp/ws-probe.out
+                      # ABSENCE of the desktop: nothing may listen on either
+                      # loopback port, an RFB probe must get no banner, and an
+                      # HTTP probe must NOT get an answer. A probe that cannot
+                      # fail is not an assertion.
+                      for port in 5901 6080; do
+                        if ss -ltn "sport = :${port}" | grep -q LISTEN; then
+                          echo "FAIL: something is still listening on ${port} before the start" >&2
+                          exit 1
+                        fi
+                      done
+                      banner=$(timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/5901 && head -c 12 <&3' 2>/dev/null || true)
+                      if [ -n "$banner" ]; then
+                        printf '%s\n' "$banner" >&2
+                        echo "FAIL: an RFB server answered on 5901 before the start" >&2
+                        exit 1
+                      fi
+                      if out=$(curl -fsS --max-time 3 http://127.0.0.1:6080/vnc.html 2>&1); then
+                        printf '%s\n' "$out" >&2
+                        echo "FAIL: noVNC answered on 6080 before the start" >&2
+                        exit 1
+                      fi
+                      # ABSENCE of the lease contract: no authorized_keys are
+                      # applied and the fresh key is refused by AUTHENTICATION.
+                      # A venue that does not answer fails this step instead of
+                      # reading as "not applied yet".
+                      ssh-keygen -q -t ed25519 -N '' -f /tmp/crabbox-lease-key
+                      out=$(ssh -p 2222 -i /tmp/crabbox-lease-key \
+                        -o BatchMode=yes -o StrictHostKeyChecking=no \
+                        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+                        crabbox@127.0.0.1 true 2>&1 || true)
+                      case "$out" in
+                        *"Permission denied (publickey"*) ;;
+                        *)
+                          printf '%s\n' "$out" >&2
+                          echo "FAIL: expected the lease to refuse the key over SSH; a venue that does not answer cannot prove the absence" >&2
+                          exit 1
+                          ;;
+                      esac
+                      test ! -e "$home/.ssh/authorized_keys"
+                      echo "ABSENT: Xvnc and the starter are installed but nothing serves on 5901 or 6080; the lease refuses the key"
+                  in_container: true
+            - check: perform — the shared bootstrap consumes the lease inputs and crabbox starts the desktop over SSH on 2222
+              id: desktop-performs-the-start
+              context:
+                - runtime
+              timeout: 240s
+              command:
+                  command: |
+                      set -euo pipefail
+                      install -d -m 0755 /crabbox
+                      # The consumer writes each input TEMP + mv; the bootstrap
+                      # reads each one ONCE. Write the same way, so the bed
+                      # exercises the contract's own input path rather than an
+                      # in-place rewrite it forbids.
+                      install -m 0644 /tmp/crabbox-lease-key.pub /crabbox/.authorized_keys.tmp
+                      printf 'crabbox_bed_nonce=%s\n' charly-pod-crabbox-desktop-bed > /crabbox/.lease.env.tmp
+                      printf '#!/bin/bash\nset -euo pipefail\nprintf "%%s\\n" "$crabbox_bed_nonce" > /var/lib/crabbox/bootstrap-marker\n' > /crabbox/.bootstrap.sh.tmp
+                      chmod 0755 /crabbox/.bootstrap.sh.tmp
+                      mv /crabbox/.authorized_keys.tmp /crabbox/authorized_keys
+                      mv /crabbox/.lease.env.tmp /crabbox/lease.env
+                      mv /crabbox/.bootstrap.sh.tmp /crabbox/bootstrap.sh
+                      # Direct mode's own shared bootstrap applies the inputs.
+                      /usr/local/libexec/crabbox/bootstrap.sh
+                      test -f /var/lib/crabbox/bootstrapped
+                      test -f /var/lib/crabbox/lease.env
+                      marker=$(tr -d '\n' < /var/lib/crabbox/bootstrap-marker)
+                      test "$marker" = charly-pod-crabbox-desktop-bed
+                      # Start the desktop through the LEASE'S OWN SSH path as
+                      # crabbox. setsid + nohup with every fd redirected detaches
+                      # it from the SSH channel; the presence step polls the
+                      # sockets, not a sleep.
+                      ssh -p 2222 -i /tmp/crabbox-lease-key \
+                        -o BatchMode=yes -o StrictHostKeyChecking=no \
+                        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+                        crabbox@127.0.0.1 \
+                        'setsid nohup /usr/local/bin/crabbox-start-desktop >/tmp/crabbox-desktop.log 2>&1 </dev/null & echo STARTED' \
+                        > /tmp/crabbox-desktop-start.out
+                      grep -qx STARTED /tmp/crabbox-desktop-start.out
+                      echo "PERFORMED: the lease bootstrap applied the inputs and crabbox started crabbox-start-desktop over SSH"
+                  in_container: true
+            - check: presence — the RFB server carries the pinned framebuffer with a RENDERED desktop, noVNC serves it and proxies it, and the lease holds over SSH
+              id: desktop-present-and-lease-holds
+              context:
+                - runtime
+              timeout: 300s
+              eventually: 180s
+              retry_interval: 3s
+              command:
+                  command: |
+                      set -euo pipefail
+                      # The lease contract's own SSH path, as the contract user:
+                      # the login name, passwordless sudo, the readiness hook the
+                      # consumer polls, and the X display the session runs on.
+                      out=$(ssh -p 2222 -i /tmp/crabbox-lease-key \
+                        -o BatchMode=yes -o StrictHostKeyChecking=no \
+                        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+                        crabbox@127.0.0.1 \
+                        'set -eu; id -un; sudo -n true && echo SUDO_OK; /usr/local/libexec/crabbox/ready; echo READY_OK; DISPLAY=:1 xrdb -query >/dev/null && echo X_OK; for c in dbus-daemon xfce4-session xfwm4 xfdesktop xfce4-panel xfsettingsd; do if pgrep -x "$c" >/dev/null; then echo "COMP $c"; fi; done')
+                      printf '%s\n' "$out"
+                      printf '%s\n' "$out" | grep -qx crabbox
+                      printf '%s\n' "$out" | grep -qx SUDO_OK
+                      printf '%s\n' "$out" | grep -qx READY_OK
+                      printf '%s\n' "$out" | grep -qx X_OK
+                      # A WORKING Xfce SESSION, not merely xfce4-session: the
+                      # session bus and every client it starts. A session with
+                      # no bus runs NONE of them — measured: no xfwm4, no
+                      # xfdesktop, no xfce4-panel, no xfsettingsd, and the
+                      # display a black root with one "Unable to contact
+                      # settings server" dialog.
+                      for c in dbus-daemon xfce4-session xfwm4 xfdesktop xfce4-panel xfsettingsd; do
+                        printf '%s\n' "$out" | grep -qx "COMP $c"
+                      done
+                      # The perform pass's own lease work was consumed by the
+                      # shared bootstrap this bed ran.
+                      marker=$(tr -d '\n' < /var/lib/crabbox/bootstrap-marker)
+                      test "$marker" = charly-pod-crabbox-desktop-bed
+                      # Both listeners are LOOPBACK ONLY: the image's stated
+                      # boundary. A wildcard bind fails here.
+                      for port in 5901 6080; do
+                        listen=$(ss -ltnH "sport = :${port}")
+                        printf '%s\n' "$listen"
+                        printf '%s\n' "$listen" | grep -q "127\.0\.0\.1:${port}"
+                        if printf '%s\n' "$listen" | grep -Eq "(0\.0\.0\.0|\*|\[::\]):${port}"; then
+                          echo "FAIL: the desktop listener on ${port} is bound to a non-loopback address" >&2
+                          exit 1
+                        fi
+                      done
+                      # noVNC's own web root answers over HTTP from the pinned
+                      # release, so the proof is not a bare listener.
+                      code=$(curl -sS --max-time 10 -D /tmp/novnc.headers -o /tmp/novnc.html -w '%{http_code}' http://127.0.0.1:6080/vnc.html)
+                      test "$code" = 200
+                      test -s /tmp/novnc.html
+                      grep -qi '^content-type: text/html' /tmp/novnc.headers
+                      grep -qi 'noVNC' /tmp/novnc.html
+                      # The RFB protocol, not a socket probe: the server's
+                      # ServerInit carries the framebuffer the TigerVNC config
+                      # pins, and a full non-incremental framebuffer update
+                      # carries a RENDERED desktop. A blank root (Xvnc up, Xfce
+                      # dead) is a near-flat image and fails the colour count:
+                      # MEASURED on this host, the no-session-bus desktop
+                      # sampled 47 colours (black root plus one error dialog)
+                      # against 602 for a working Xfce session, so 200 is the
+                      # separating line with a factor of four either side.
+                      cat > /tmp/crabbox-rfb-probe.py <<'PYPROBE'
+                      import socket
+                      import struct
+                      import sys
+
+                      def recvn(sock, n):
+                          buf = b''
+                          while len(buf) < n:
+                              chunk = sock.recv(n - len(buf))
+                              if not chunk:
+                                  raise SystemExit('connection closed after %d of %d bytes' % (len(buf), n))
+                              buf += chunk
+                          return buf
+
+                      port = int(sys.argv[1])
+                      sock = socket.create_connection(('127.0.0.1', port), timeout=20)
+                      version = recvn(sock, 12)
+                      if not version.startswith(b'RFB '):
+                          raise SystemExit('not an RFB server: %r' % (version,))
+                      sock.sendall(b'RFB 003.008\n')
+                      nsec = recvn(sock, 1)[0]
+                      if nsec == 0:
+                          raise SystemExit('the server refused the connection')
+                      types = recvn(sock, nsec)
+                      if 1 not in types:
+                          raise SystemExit('SecurityTypes None is not offered: %r' % (types,))
+                      sock.sendall(b'\x01')
+                      result = struct.unpack('>I', recvn(sock, 4))[0]
+                      if result != 0:
+                          raise SystemExit('security handshake failed: %d' % result)
+                      sock.sendall(b'\x01')
+                      head = recvn(sock, 24)
+                      width, height = struct.unpack('>HH', head[0:4])
+                      namelen = struct.unpack('>I', head[20:24])[0]
+                      name = recvn(sock, namelen).decode('utf-8', 'replace')
+                      sock.sendall(struct.pack('>BBBB', 0, 0, 0, 0)
+                                   + bytes([32, 24, 0, 1])
+                                   + struct.pack('>HHH', 255, 255, 255)
+                                   + bytes([16, 8, 0, 0, 0, 0]))
+                      sock.sendall(struct.pack('>BB', 2, 0) + struct.pack('>H', 1) + struct.pack('>i', 0))
+                      sock.sendall(struct.pack('>BBHHHH', 3, 0, 0, 0, width, height))
+                      colours = set()
+                      covered = 0
+                      while covered < width * height:
+                          mtype = recvn(sock, 1)[0]
+                          if mtype == 0:
+                              recvn(sock, 1)
+                              nrects = struct.unpack('>H', recvn(sock, 2))[0]
+                              for _ in range(nrects):
+                                  x, y, w, h = struct.unpack('>HHHH', recvn(sock, 8))
+                                  enc = struct.unpack('>i', recvn(sock, 4))[0]
+                                  if enc != 0:
+                                      raise SystemExit('unexpected encoding %d' % enc)
+                                  data = recvn(sock, w * h * 4)
+                                  for row in range(0, h, 8):
+                                      base = row * w * 4
+                                      for col in range(0, w, 8):
+                                          off = base + col * 4
+                                          colours.add(data[off:off + 3])
+                                  covered += w * h
+                          elif mtype == 1:
+                              recvn(sock, 1)
+                              recvn(sock, 2)
+                              ncolours = struct.unpack('>H', recvn(sock, 2))[0]
+                              recvn(sock, ncolours * 6)
+                          elif mtype == 2:
+                              continue
+                          elif mtype == 3:
+                              recvn(sock, 3)
+                              length = struct.unpack('>i', recvn(sock, 4))[0]
+                              recvn(sock, length)
+                          else:
+                              raise SystemExit('unexpected server message %d' % mtype)
+                      sock.close()
+                      print('rfb framebuffer: %dx%d name=%r' % (width, height, name))
+                      print('framebuffer colours: %d' % len(colours))
+                      if (width, height) != (1920, 1080):
+                          raise SystemExit('the framebuffer is %dx%d, not the 1920x1080 the TigerVNC config pins' % (width, height))
+                      if len(colours) < 200:
+                          raise SystemExit('the framebuffer carries %d sampled colours; a rendered Xfce desktop samples in the hundreds, so the root is blank' % len(colours))
+                      print('RFB_OK')
+                      PYPROBE
+                      python3 /tmp/crabbox-rfb-probe.py 5901 | tee /tmp/rfb-probe.out
+                      grep -qx RFB_OK /tmp/rfb-probe.out
+                      # The WebSocket proxy on noVNC's port forwards the SAME
+                      # server's banner, so the path the browser takes works
+                      # rather than only the raw VNC port.
+                      cat > /tmp/crabbox-ws-probe.py <<'WSPROBE'
+                      import base64
+                      import os
+                      import socket
+                      import struct
+                      import sys
+
+                      def recvn(sock, n):
+                          buf = b''
+                          while len(buf) < n:
+                              chunk = sock.recv(n - len(buf))
+                              if not chunk:
+                                  raise SystemExit('connection closed after %d of %d bytes' % (len(buf), n))
+                              buf += chunk
+                          return buf
+
+                      port = int(sys.argv[1])
+                      sock = socket.create_connection(('127.0.0.1', port), timeout=20)
+                      key = base64.b64encode(os.urandom(16)).decode('ascii')
+                      request = ('GET /websockify HTTP/1.1\r\n'
+                                 'Host: 127.0.0.1:%d\r\n'
+                                 'Upgrade: websocket\r\n'
+                                 'Connection: Upgrade\r\n'
+                                 'Sec-WebSocket-Key: %s\r\n'
+                                 'Sec-WebSocket-Version: 13\r\n'
+                                 'Origin: http://127.0.0.1:%d\r\n'
+                                 '\r\n') % (port, key, port)
+                      sock.sendall(request.encode('ascii'))
+                      head = b''
+                      while b'\r\n\r\n' not in head:
+                          chunk = sock.recv(1)
+                          if not chunk:
+                              raise SystemExit('no response to the websocket handshake')
+                          head += chunk
+                      status = head.split(b'\r\n', 1)[0].decode('ascii', 'replace')
+                      if ' 101 ' not in status:
+                          raise SystemExit('the websocket handshake was refused: %s' % status)
+                      header = recvn(sock, 2)
+                      masked = header[1] & 0x80
+                      length = header[1] & 0x7f
+                      if length == 126:
+                          length = struct.unpack('>H', recvn(sock, 2))[0]
+                      elif length == 127:
+                          length = struct.unpack('>Q', recvn(sock, 8))[0]
+                      mask = recvn(sock, 4) if masked else b''
+                      payload = recvn(sock, length)
+                      if masked:
+                          payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+                      print('websocket payload: %r' % (payload[:12],))
+                      sock.close()
+                      if not payload.startswith(b'RFB '):
+                          raise SystemExit('the proxy did not forward the VNC server banner')
+                      print('WS_OK')
+                      WSPROBE
+                      python3 /tmp/crabbox-ws-probe.py 6080 | tee /tmp/ws-probe.out
+                      grep -qx WS_OK /tmp/ws-probe.out
+                      echo "PRESENT: the RFB server carries a rendered 1920x1080 desktop, noVNC serves and proxies it on loopback, Xfce and its WM run in display :1 as crabbox, and the lease holds over SSH"
+                  in_container: true

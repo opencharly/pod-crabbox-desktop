@@ -15,6 +15,33 @@ novnc_web="${CRABBOX_NOVNC_WEB:-/usr/share/webapps/novnc}"
 # Display :N is VNC port 5900+N.
 vnc_port="${CRABBOX_VNC_PORT:-$((5900 + ${display#:}))}"
 
+# ---------------------------------------------------------------------------
+# The D-Bus SESSION BUS the Xfce session runs on.
+#
+# A lease has no systemd and no logind, so `pam_systemd` never runs: there is no
+# XDG_RUNTIME_DIR and no session bus, and Arch compiles dbus-launch's X11
+# autolaunch out (and there is no /etc/machine-id to derive one from anyway).
+# xfce4-session needs the bus to start ANY of its clients, so without this the
+# display is a black root carrying one "Unable to contact settings server"
+# dialog: measured, no xfwm4, no xfdesktop, no xfce4-panel, no xfsettingsd, and
+# the framebuffer sampled 47 colours against 602 for a working session.
+#
+# The daemon is started explicitly rather than through dbus-launch precisely
+# because autolaunch is the half that cannot work here. A consumer that already
+# exported a bus address keeps it, and the runtime dir it names is reused.
+# ---------------------------------------------------------------------------
+runtime_dir="${XDG_RUNTIME_DIR:-${HOME}/.run}"
+install -d -m 0700 "${runtime_dir}"
+export XDG_RUNTIME_DIR="${runtime_dir}"
+
+bus_pid=""
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    bus_info=$(dbus-daemon --session --fork --print-address=1 --print-pid=1)
+    DBUS_SESSION_BUS_ADDRESS=$(printf '%s\n' "${bus_info}" | sed -n 1p)
+    bus_pid=$(printf '%s\n' "${bus_info}" | sed -n 2p)
+    export DBUS_SESSION_BUS_ADDRESS
+fi
+
 vncserver "${display}" &
 vnc_pid=$!
 
@@ -23,7 +50,7 @@ vnc_pid=$!
 websockify --web "${novnc_web}" "127.0.0.1:${novnc_port}" "127.0.0.1:${vnc_port}" &
 ws_pid=$!
 
-# Whichever half exits takes the other with it, so a stopped desktop leaves no
-# orphan Xvnc behind.
-trap 'kill "${vnc_pid}" "${ws_pid}" 2>/dev/null || true' EXIT INT TERM
+# Whichever half exits takes the other — and the session bus this script
+# started — with it, so a stopped desktop leaves no orphan Xvnc behind.
+trap 'kill "${vnc_pid}" "${ws_pid}" ${bus_pid} 2>/dev/null || true' EXIT INT TERM
 wait -n "${vnc_pid}" "${ws_pid}"
