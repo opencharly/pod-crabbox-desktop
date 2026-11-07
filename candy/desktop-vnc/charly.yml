@@ -38,9 +38,11 @@ desktop-vnc:
             `/etc/tigervnc/vncserver-config-defaults` pins the Xfce session,
             1920x1080x24, the loopback bind, and disabled VNC auth (the loopback
             bind and the lease's SSH session are the boundary).
-            `/usr/local/bin/crabbox-start-desktop` starts the Xfce session on
-            display `:1` (VNC 5901) and serves the noVNC web root with websockify
-            on `127.0.0.1:6080`; the consumer reaches the display through the
+            `/usr/local/bin/crabbox-start-desktop` creates the runtime dir and
+            starts the D-Bus session bus the Xfce session runs on (a lease has
+            no logind, so nothing else does), starts the Xfce session on display
+            `:1` (VNC 5901) and serves the noVNC web root with websockify on
+            `127.0.0.1:6080`; the consumer reaches the display through the
             lease's SSH session, and the wrapper never replaces the image
             entrypoint, so sshd stays PID 1 and the readiness hook still runs
             first.
@@ -208,6 +210,20 @@ desktop-vnc:
                   grep -q -- 'CRABBOX_NOVNC_PORT:-6080' /usr/local/bin/crabbox-start-desktop &&
                   grep -q -- '5900 +' /usr/local/bin/crabbox-start-desktop &&
                   grep -q -- '127.0.0.1:' /usr/local/bin/crabbox-start-desktop
+            - check: the desktop starter establishes the session bus and runtime dir the Xfce session needs
+              id: desktop-vnc-session-bus
+              exit_status: 0
+              # The Xfce session is a D-Bus client set: without a session bus
+              # xfce4-session starts none of its clients and the display is a
+              # black root with one error dialog. A lease has no logind, so the
+              # starter — not `dbus-launch`'s X11 autolaunch, which Arch compiles
+              # out — owns this. The build container can prove the wrapper
+              # carries it; only the disposable bed can prove a session starts.
+              command: >-
+                  test -x /usr/bin/dbus-daemon &&
+                  grep -q -- 'XDG_RUNTIME_DIR' /usr/local/bin/crabbox-start-desktop &&
+                  grep -q -- 'dbus-daemon --session' /usr/local/bin/crabbox-start-desktop &&
+                  grep -q -- 'DBUS_SESSION_BUS_ADDRESS' /usr/local/bin/crabbox-start-desktop
             # ------------------------------------------------------------------
             # The inherited lease contract, probed at THIS image's boundary.
             # ------------------------------------------------------------------
